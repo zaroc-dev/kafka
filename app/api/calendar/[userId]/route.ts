@@ -34,7 +34,22 @@ export async function GET(
     const studyField = (userSettings.studyField as studyFieldType) || "Other";
     const enrolledClasses = userSettings.enrolledClasses || [];
 
-    const schoolYear = await webuntisApi.getCurrentSchoolYear();
+    let schoolYear;
+    if (userSettings.defaultSchoolYear) {
+      try {
+        schoolYear = await webuntisApi.getSchoolYearByName(
+          userSettings.defaultSchoolYear,
+        );
+      } catch (error) {
+        console.warn(
+          `Saved school year ${userSettings.defaultSchoolYear} is unavailable; using the current school year instead.`,
+          error,
+        );
+        schoolYear = await webuntisApi.getCurrentSchoolYear();
+      }
+    } else {
+      schoolYear = await webuntisApi.getCurrentSchoolYear();
+    }
 
     const allLessons = await webuntisApi.getAllLessonsForSchoolYear(
       schoolYear,
@@ -44,14 +59,19 @@ export async function GET(
 
     // Filter lessons by user's enrolled subjects (consistent with /api/webuntis)
     const subjectIds = new Set(subjects.map((s) => s.id));
-    const filteredLessons = allLessons.filter(
-      (lesson) =>
+    const uniqueLessons = new Map<number, WebUntisLesson>();
+
+    for (const lesson of allLessons) {
+      if (
         lesson.su &&
-        lesson.su.some((su: { id: number }) => subjectIds.has(su.id)),
-    );
+        lesson.su.some((su: { id: number }) => subjectIds.has(su.id))
+      ) {
+        uniqueLessons.set(lesson.id, lesson as WebUntisLesson);
+      }
+    }
 
     const parsedEvents = convertWebUntisLessons(
-      filteredLessons as WebUntisLesson[],
+      Array.from(uniqueLessons.values()),
     );
     const groupedEvents = groupConsecutiveLessons(parsedEvents);
 
