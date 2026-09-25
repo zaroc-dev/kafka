@@ -1,4 +1,4 @@
-import { Subject, UserSubject } from "@/types/subjects";
+import type { UserSubject } from "@/types/subjects";
 import { FieldMap, studyFieldType } from "@/types/types";
 import { Lesson, SchoolYear, WebUntis } from "webuntis";
 
@@ -10,6 +10,11 @@ const default_settings = {
   server: process.env.WEBUNTIS_SERVER || "hs-albstadt.webuntis.com",
   useragent: process.env.WEBUNTIS_USERAGENT || "WebUntis/1.0",
 };
+
+// WebUntis listet Propädeutikum/vorlesungsfrei/Prüfungszeit als eigene
+// "Schuljahre" zwischen den echten Semestern. Nur "WS 2026/2027", "SS 2026"
+// oder "2025/2026" sollen als echtes Semester zählen.
+const SEMESTER_NAME_REGEX = /^(?:WS\s?\d{4}\/\d{4}|SS\s?\d{4}|\d{4}\/\d{4})$/;
 
 export class WebUntisAPI {
   public webuntis: WebUntis;
@@ -57,19 +62,39 @@ export class WebUntisAPI {
       console.error("Logout failed:", error);
     }
   }
-  // aktuelles Semester
+  // aktuelles Semester: WebUntis' eigenes getCurrentSchoolyear() liefert
+  // in den Übergangswochen (z.B. Propädeutikum) irrtümlich diese
+  // Kurzperioden statt des echten Semesters. Deshalb wird stattdessen aus
+  // allen Schuljahren per Namens-Regex das nächstgelegene echte Semester
+  // (WS/SS) ausgewählt.
   async getCurrentSchoolYear() {
-    const schoolYear = await this.webuntis.getCurrentSchoolyear(
-      this.validateSession,
+    const years = await this.getSchoolYears();
+    const semesters = years.filter((y: SchoolYear) =>
+      SEMESTER_NAME_REGEX.test(y.name.trim()),
     );
-    if (schoolYear.id === null || schoolYear.id === undefined) {
+
+    if (semesters.length === 0) {
       throw new Error("No current school year found.");
     }
-    this.currentSchoolyear = schoolYear;
-    return schoolYear;
+
+    const now = Date.now();
+    const distanceToNow = (year: SchoolYear) => {
+      const start = new Date(year.startDate).getTime();
+      const end = new Date(year.endDate).getTime();
+      if (now < start) return start - now;
+      if (now > end) return now - end;
+      return 0;
+    };
+
+    const closest = semesters.reduce((best, year) =>
+      distanceToNow(year) < distanceToNow(best) ? year : best,
+    );
+
+    this.currentSchoolyear = closest;
+    return closest;
   }
 
-  async getSchoolYears() {
+  async getSchoolYears(): Promise<SchoolYear[]> {
     const cacheKey = "schoolYears";
     const cached = this.dataCache.get(cacheKey);
     if (cached && Date.now() - cached.timestamp < this.CACHE_TTL) {
@@ -168,7 +193,7 @@ export class WebUntisAPI {
     const allSubjects = await this.webuntis.getSubjects(this.validateSession);
 
     // Filter allSubjects by the IDs we found in the timetable
-    const filteredSubjects = allSubjects
+    return allSubjects
       .filter((s) => subjectIdsInTimetable.has(s.id))
       .map((s) => ({
         ...s,
@@ -176,8 +201,6 @@ export class WebUntisAPI {
         alternateName: s.alternateName || "",
         active: s.active ?? true,
       }));
-
-    return filteredSubjects;
   }
 
   async getRooms() {
@@ -270,7 +293,7 @@ export class WebUntisAPI {
     studyField: studyFieldType,
     enrolledClasses?: string[],
   ) {
-    this.currentSchoolyear = await this.getSchoolYearByName("2025/2026");
+    this.currentSchoolyear = await this.getCurrentSchoolYear();
 
     if (studyField === "Other") {
       return [];
@@ -308,11 +331,9 @@ export class WebUntisAPI {
 
     const uncompleted_subjects = enrolledSubjects.filter((s) => !s.completed);
 
-    const filteredTimetable = timetableEntries.filter((entry) =>
+    return timetableEntries.filter((entry) =>
       uncompleted_subjects.some((us) => us.id === entry.su[0]?.id),
     );
-
-    return filteredTimetable;
   }
 
   async getAllLessonsForSchoolYear(
